@@ -1,0 +1,113 @@
+﻿// CSMain.compute
+#pragma kernel CSMain
+
+RWStructuredBuffer<int> _HitResultBuffer; // 存储被击中的三角形索引
+
+int _Width;
+int _Height;
+float4x4 _CameraToWorld;
+float4x4 _CameraInverseProjection;
+
+struct GPUObject
+{
+    float4 aabbMin;
+    float4 aabbMax;
+    int triOffset;
+    int triCount;
+    int pad0, pad1;
+};
+
+struct GPUTriangle
+{
+    float4 A, B, C;
+};
+
+StructuredBuffer<GPUObject> _Objects;
+StructuredBuffer<GPUTriangle> _Triangles;
+int _ObjectCount;
+
+// 修正后的 AABB 检测
+bool RayAABB(float3 ro, float3 rd, float3 bmin, float3 bmax, out float tMin, out float tMax)
+{
+    float3 invD = 1.0 / (rd + 1e-9);
+    float3 t0 = (bmin - ro) * invD;
+    float3 t1 = (bmax - ro) * invD;
+    float3 tSmall = min(t0, t1);
+    float3 tBig = max(t0, t1);
+    tMin = max(max(tSmall.x, tSmall.y), tSmall.z);
+    tMax = min(min(tBig.x, tBig.y), tBig.z); // 修正点
+    return tMax >= max(tMin, 0.0);
+}
+
+// 修正后的 MT 算法
+bool RayTriangle_MT(float3 ro, float3 rd, float3 A, float3 B, float3 C, out float t)
+{
+    float3 E1 = B - A;
+    float3 E2 = C - A;
+    float3 P = cross(rd, E2);
+    float det = dot(E1, P);
+    if (abs(det) < 1e-6)
+        return false;
+    float invDet = 1.0 / det;
+    float3 T = ro - A;
+    float u = dot(T, P) * invDet;
+    if (u < 0.0 || u > 1.0)
+        return false;
+    float3 Q = cross(T, E1);
+    float v = dot(rd, Q) * invDet; // 修正点
+    if (v < 0 || (u + v) > 1.0)
+        return false;
+    t = dot(E2, Q) * invDet;
+    return t > 0.0;
+}
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint) _Width || id.y >= (uint) _Height)
+        return;
+
+    // 只有屏幕中心发出的光线才触发检测（或者你可以根据鼠标点击位置）
+    // 这里假设只检测屏幕中心那条线，减少冲突
+    if (id.x != (uint) _Width / 2 || id.y != (uint) _Height / 2)
+        return;
+
+    float2 uv = (float2(id.xy) + 0.5) / float2(_Width, _Height);
+    float3 ro = _CameraToWorld._m03_m13_m23;
+    
+    float2 ndc = uv * 2.0 - 1.0;
+    float4 view = mul(_CameraInverseProjection, float4(ndc, 1.0, 1.0));
+    view.xyz /= view.w;
+    float3 rd = normalize(mul((float3x3) _CameraToWorld, view.xyz));
+
+    float bestT = 1e30;
+    int bestTri = -1;
+    int hitObjIdx = -1;
+
+    for (int oi = 0; oi < _ObjectCount; oi++)
+    {
+        GPUObject obj = _Objects[oi];
+        float tMin, tMax;
+        if (!RayAABB(ro, rd, obj.aabbMin.xyz, obj.aabbMax.xyz, tMin, tMax))
+            continue;
+        int start = obj.triOffset;
+        for (int ti = 0; ti < obj.triCount; ti++)
+        {
+            GPUTriangle tri = _Triangles[start + ti];
+            float t;
+            if (RayTriangle_MT(ro, rd, tri.A.xyz, tri.B.xyz, tri.C.xyz, t))
+            {
+                if (t < bestT)
+                {
+                    bestT = t;
+                    hitObjIdx = oi;
+                    bestTri = start + ti;
+                }
+            }
+        }
+    }
+    if (id.x == (uint) _Width / 2 && id.y == (uint) _Height / 2)
+    {
+        _HitResultBuffer[0] = bestTri;
+    }
+}
