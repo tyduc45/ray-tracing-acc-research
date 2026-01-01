@@ -2,16 +2,15 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
 
-[ExecuteAlways]
 [RequireComponent(typeof(Camera))]
 public class RayTracingManager : MonoBehaviour
 {
     public static RayTracingManager Instance { get; private set; }
+    private ComputeBuffer hitBuffer; // 外部传入的结果引用
+    private static readonly List<RayTracedMesh> s_meshes = new();
 
     [Header("Compute")]
     public ComputeShader rayTraceCS;
-
-    private static readonly List<RayTracedMesh> s_meshes = new();
 
     private Camera cam;
     private int kernel;
@@ -19,7 +18,7 @@ public class RayTracingManager : MonoBehaviour
 
     private ComputeBuffer objectBuffer;
     private ComputeBuffer triangleBuffer;
-    private ComputeBuffer hitBuffer; // 外部传入的结果引用
+    
 
     struct GPUObject
     {
@@ -80,7 +79,6 @@ public class RayTracingManager : MonoBehaviour
         if (rayTraceCS != null)
         {
             kernel = rayTraceCS.FindKernel("CSMain");
-            Debug.Log($"kernel:{kernel}");
             rayTraceCS.GetKernelThreadGroupSizes(kernel, out tgx, out tgy, out tgz);
         }
     }
@@ -170,7 +168,7 @@ public class RayTracingManager : MonoBehaviour
                 pad1 = 0
             });
         }
-
+       
         // 3. 统一上传 (修正：移出循环)
         if (objects.Count > 0 && triangles.Count > 0)
         {

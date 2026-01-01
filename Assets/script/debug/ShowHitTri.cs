@@ -32,11 +32,8 @@ public class RayHitHighlighter : MonoBehaviour
 
     private void Update()
     {
-        // 容错处理：如果 Manager 是动态生成的，确保注册成功
-        if (RayTracingManager.Instance != null)
-        {
-            RayTracingManager.Instance.RegisterHitBuffer(_hitBuffer);
-        }
+        Debug.Log("run");
+        RayTracingManager.Instance.RegisterHitBuffer(_hitBuffer);
     }
 
     private void OnDisable()
