@@ -132,6 +132,7 @@ GameObject:
   - component: {fileID: 330585544}
   - component: {fileID: 330585547}
   - component: {fileID: 330585548}
+  - component: {fileID: 330585549}
   m_Layer: 0
   m_Name: Main Camera
   m_TagString: MainCamera
@@ -270,6 +271,22 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::RayTracingManager
   rayTraceCS: {fileID: 7200000, guid: 44eabdb422d6a4e488f367f8f845b975, type: 3}
+--- !u!114 &330585549
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 330585543}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: dd6b1eaf29667f447b66a2016f33ecfb, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::CameraFlyController
+  moveSpeed: 95.8
+  shiftMultiplier: 2.5
+  rotateSpeed: 2
+  zoomSpeed: 5
 --- !u!1 &357829900
 GameObject:
   m_ObjectHideFlags: 0
@@ -279,32 +296,14 @@ GameObject:
   serializedVersion: 6
   m_Component:
   - component: {fileID: 357829902}
-  - component: {fileID: 357829901}
+  - component: {fileID: 357829903}
   m_Layer: 0
-  m_Name: GameObject
+  m_Name: PerformanceCheck
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
   m_IsActive: 1
---- !u!114 &357829901
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 357829900}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 533e759db95a6a441b82dc77d7819136, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::KernalDispatch
-  cam: {fileID: 330585545}
-  kernel: 0
-  tgx: 0
-  tgy: 0
-  tgz: 0
-  rayTraceCS: {fileID: 7200000, guid: 44eabdb422d6a4e488f367f8f845b975, type: 3}
 --- !u!4 &357829902
 Transform:
   m_ObjectHideFlags: 0
@@ -320,6 +319,21 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &357829903
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 357829900}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 7e4baf5733fb2f648933e8353664ab2c, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::PerformanceStats
+  textColor: {r: 0.015686274, g: 1, b: 0.1577523, a: 1}
+  fontSize: 20
+  offset: {x: 10, y: 10}
 --- !u!1 &410087039
 GameObject:
   m_ObjectHideFlags: 0
