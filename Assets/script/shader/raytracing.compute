@@ -163,24 +163,29 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     if (id.x >= (uint) _Width || id.y >= (uint) _Height)
         return;
 
-    // 1. 生成射線
+    // 1. 生成射线
     float2 uv = (float2(id.xy) + 0.5) / float2(_Width, _Height);
-    float3 ro = _CameraToWorld._m03_m13_m23;
     float2 ndc = uv * 2.0 - 1.0;
-    float4 view = mul(_CameraInverseProjection, float4(ndc, 1.0, 1.0));
-    view.xyz /= view.w;
-    float3 rd = normalize(mul((float3x3) _CameraToWorld, view.xyz));
 
-    // 2. 遍歷場景
+    // 正确获取世界空间相机起点 
+    float3 ro = mul(_CameraToWorld, float4(0, 0, 0, 1)).xyz;
+
+    // 将 NDC 坐标变换到世界空间的目标点 
+    float4 target_view = mul(_CameraInverseProjection, float4(ndc, 1.0, 1.0));
+    target_view.xyz /= target_view.w;
+    float3 target_world = mul(_CameraToWorld, float4(target_view.xyz, 1.0)).xyz;
+
+    // 射线方向 = 目标点 - 起点 
+    float3 rd = normalize(target_world - ro);
+
+    // 2. 遍历场景
     float bestT;
     int bestTri;
     TraceScene(ro, rd, bestT, bestTri);
 
-    // 3. 輸出 (僅中心像素示例)
+    // 3. 只有中心像素更新 Buffer
     if (id.x == (uint) _Width / 2 && id.y == (uint) _Height / 2)
     {
         _HitResultBuffer[0] = bestTri;
     }
-    //_HitResultBuffer[0] = 5;
-
 }

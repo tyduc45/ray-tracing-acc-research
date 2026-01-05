@@ -27,7 +27,7 @@ public class BVHBuilder
         int nodeIdx = _flatNodes.Count;
         _flatNodes.Add(default);
 
-        if (count <= 2) // leaf node 
+        if (count <= 50) // leaf node 
         {
             _flatNodes[nodeIdx] = new BVHNode
             {
