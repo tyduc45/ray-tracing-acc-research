@@ -1,10 +1,14 @@
-﻿// CSMain.compute
-#pragma kernel CSMain
+﻿#pragma kernel CSMain
 
-RWStructuredBuffer<int> _HitResultBuffer; // 存储被击中的三角形索引
 
+//#define USE_BRUTE_FORCE 
+#define USE_BVH
+
+// 基础资源绑定
+RWStructuredBuffer<int> _HitResultBuffer;
 int _Width;
 int _Height;
+int _NodeCount;
 float4x4 _CameraToWorld;
 float4x4 _CameraInverseProjection;
 
@@ -22,11 +26,25 @@ struct GPUTriangle
     float4 A, B, C;
 };
 
+// 基础数据源
 StructuredBuffer<GPUObject> _Objects;
 StructuredBuffer<GPUTriangle> _Triangles;
 int _ObjectCount;
 
-// 修正后的 AABB 检测
+// --- BVH 专用资源 (预留，现在不填也不报错) ---
+#ifdef USE_BVH
+struct BVHNode {
+    float4 bmin; // xyz: min, w: leftNode/start triangle offset
+    float4 bmax; // xyz: max, w: nextIndex/triCount
+};
+StructuredBuffer<BVHNode> _BVHNodes;
+#endif
+
+// ==========================================
+// 几何检测工具函数 (原子逻辑，保持不动)
+// ==========================================
+
+// 三维包围盒击中检测算法
 bool RayAABB(float3 ro, float3 rd, float3 bmin, float3 bmax, out float tMin, out float tMax)
 {
     float3 invD = 1.0 / (rd + 1e-9);
@@ -35,11 +53,11 @@ bool RayAABB(float3 ro, float3 rd, float3 bmin, float3 bmax, out float tMin, out
     float3 tSmall = min(t0, t1);
     float3 tBig = max(t0, t1);
     tMin = max(max(tSmall.x, tSmall.y), tSmall.z);
-    tMax = min(min(tBig.x, tBig.y), tBig.z); // 修正点
+    tMax = min(min(tBig.x, tBig.y), tBig.z);
     return tMax >= max(tMin, 0.0);
 }
 
-// 修正后的 MT 算法
+//三维射线三角相交检测算法
 bool RayTriangle_MT(float3 ro, float3 rd, float3 A, float3 B, float3 C, out float t)
 {
     float3 E1 = B - A;
@@ -54,60 +72,128 @@ bool RayTriangle_MT(float3 ro, float3 rd, float3 A, float3 B, float3 C, out floa
     if (u < 0.0 || u > 1.0)
         return false;
     float3 Q = cross(T, E1);
-    float v = dot(rd, Q) * invDet; // 修正点
+    float v = dot(rd, Q) * invDet;
     if (v < 0 || (u + v) > 1.0)
         return false;
     t = dot(E2, Q) * invDet;
     return t > 0.0;
 }
 
-[numthreads(8, 8, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID)
+// ==========================================
+// ACCELERATION STRUCTURE LOGIC 
+// ==========================================
+
+//  原有的遍历方式
+void Intersect_BruteForce(float3 ro, float3 rd, inout float bestT, inout int bestTri)
 {
-    if (id.x >= (uint) _Width || id.y >= (uint) _Height)
-        return;
-
-    // 只有屏幕中心发出的光线才触发检测（或者你可以根据鼠标点击位置）
-    // 这里假设只检测屏幕中心那条线，减少冲突
-    if (id.x != (uint) _Width / 2 || id.y != (uint) _Height / 2)
-        return;
-
-    float2 uv = (float2(id.xy) + 0.5) / float2(_Width, _Height);
-    float3 ro = _CameraToWorld._m03_m13_m23;
-    
-    float2 ndc = uv * 2.0 - 1.0;
-    float4 view = mul(_CameraInverseProjection, float4(ndc, 1.0, 1.0));
-    view.xyz /= view.w;
-    float3 rd = normalize(mul((float3x3) _CameraToWorld, view.xyz));
-
-    float bestT = 1e30;
-    int bestTri = -1;
-    int hitObjIdx = -1;
-
     for (int oi = 0; oi < _ObjectCount; oi++)
     {
         GPUObject obj = _Objects[oi];
         float tMin, tMax;
         if (!RayAABB(ro, rd, obj.aabbMin.xyz, obj.aabbMax.xyz, tMin, tMax))
             continue;
-        int start = obj.triOffset;
+        
         for (int ti = 0; ti < obj.triCount; ti++)
         {
-            GPUTriangle tri = _Triangles[start + ti];
+            int triIdx = obj.triOffset + ti;
+            GPUTriangle tri = _Triangles[triIdx];
             float t;
             if (RayTriangle_MT(ro, rd, tri.A.xyz, tri.B.xyz, tri.C.xyz, t))
             {
                 if (t < bestT)
                 {
                     bestT = t;
-                    hitObjIdx = oi;
-                    bestTri = start + ti;
+                    bestTri = triIdx;
                 }
             }
         }
     }
-    if (id.x == (uint) _Width / 2 && id.y == (uint) _Height / 2)
+}
+
+// BVH 遍历方式 (示例框架)
+#ifdef USE_BVH
+void Intersect_BVH(float3 ro, float3 rd, float t, out int triIdx)
+{
+    int stack[32];
+    int stackPtr = 0;
+    stack[stackPtr++] = 0;
+    while (stackPtr > 0)
     {
-        _HitResultBuffer[0] = bestTri;
+        int nodeIdx = stack[--stackPtr];
+        BVHNode node = _BVHNodes[nodeIdx];
+        float tMin, tMax;
+        if (RayAABB(ro,rd,node.bmin.xyz,node.bmax.xyz,tMin,tMax))
+        {
+            int leftVal = node.bmin.w;
+            int count = node.bmax.w;
+            if (leftVal < 0) // 是叶子节点 ,leftVal = -(start + 1)
+            {
+                int start = -(leftVal + 1);
+                for (int i = start; i < start + count;i++)
+                {
+                    GPUTriangle target = _Triangles[i];
+                    float tempT;
+                    if (RayTriangle_MT(ro,rd,target.A.xyz,target.B.xyz,target.C.xyz,tempT))
+                    {
+                        if (tempT < t && tempT > 0.001)
+                        {
+                            t = tempT;
+                            triIdx = i;
+                        }
+                    }
+                }
+            }
+            else // 不是叶子节点则左右节点压栈
+            {
+                if (stackPtr < 32)
+                {
+                    stack[stackPtr++] = (int) node.bmin.w;
+                    stack[stackPtr++] = (int) node.bmax.w;
+                }
+            }
+        }
     }
+}
+#endif
+
+// --- 抽象统一接口 ---
+void TraceScene(float3 ro, float3 rd, out float t, out int triIdx)
+{
+    t = 1e30;
+    triIdx = -1;
+
+#if defined(USE_BVH)
+        Intersect_BVH(ro, rd, t, triIdx);
+#elif defined(USE_BRUTE_FORCE)
+    Intersect_BruteForce(ro, rd, t, triIdx);
+#endif
+}
+
+// ==========================================
+// MAIN ENTRY
+// ==========================================
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint) _Width || id.y >= (uint) _Height)
+        return;
+    if (id.x != (uint) _Width / 2 || id.y != (uint) _Height / 2)
+        return;
+
+    // 1. 生成光线 (这部分逻辑永远不变)
+    float2 uv = (float2(id.xy) + 0.5) / float2(_Width, _Height);
+    float3 ro = _CameraToWorld._m03_m13_m23;
+    float2 ndc = uv * 2.0 - 1.0;
+    float4 view = mul(_CameraInverseProjection, float4(ndc, 1.0, 1.0));
+    view.xyz /= view.w;
+    float3 rd = normalize(mul((float3x3) _CameraToWorld, view.xyz));
+
+    // 2. 调用抽象接口 (不管底层怎么实现的)
+    float bestT;
+    int bestTri;
+    TraceScene(ro, rd, bestT, bestTri);
+
+    // 3. 输出结果
+    _HitResultBuffer[0] = bestTri;
 }
