@@ -1,5 +1,6 @@
 using UnityEngine;
 using System.Runtime.InteropServices;
+using UnityEditor.Rendering.LookDev;
 
 namespace RayTracing.Data
 {
@@ -25,6 +26,15 @@ namespace RayTracing.Data
     public struct GPUObjectData
     {
         public Matrix4x4 localToWorld;
+       
         public int materialID;
     }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct GPUInstanceData
+    {
+        public Matrix4x4 localToWorld;
+        public Matrix4x4 worldToLocal;
+    }
 }
+

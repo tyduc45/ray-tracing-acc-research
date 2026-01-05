@@ -31,7 +31,6 @@ public class CameraFlyController : MonoBehaviour
     {
         if (Input.GetMouseButton(1))
         {
-            Debug.Log("called mouse right clicked");
             // 锁定并隐藏鼠标（可选，提升体验）
             Cursor.lockState = CursorLockMode.Locked;
 
@@ -64,7 +63,6 @@ public class CameraFlyController : MonoBehaviour
 
         transform.position += moveDir * speed * Time.deltaTime;
 
-        Debug.Log("called wasd clicked");
     }
 
     // --- 3. 缩放逻辑：滚轮变换缩放 (FOV) ---

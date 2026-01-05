@@ -1,24 +1,19 @@
 ﻿#pragma kernel CSMain
 
-
-//#define USE_BRUTE_FORCE 
 #define USE_BVH
 
 // 基础资源绑定
 RWStructuredBuffer<int> _HitResultBuffer;
 int _Width;
 int _Height;
-int _NodeCount;
 float4x4 _CameraToWorld;
 float4x4 _CameraInverseProjection;
 
-struct GPUObject
+// --- 实例数据结构 ---
+struct GPUInstanceData
 {
-    float4 aabbMin;
-    float4 aabbMax;
-    int triOffset;
-    int triCount;
-    int pad0, pad1;
+    float4x4 localToWorld;
+    float4x4 worldToLocal;
 };
 
 struct GPUTriangle
@@ -27,25 +22,24 @@ struct GPUTriangle
 };
 
 // 基础数据源
-StructuredBuffer<GPUObject> _Objects;
 StructuredBuffer<GPUTriangle> _Triangles;
-int _ObjectCount;
+StructuredBuffer<GPUInstanceData> _Instances; // 每一帧更新的矩阵数组
+int _InstanceCount;
 
-// --- BVH 专用资源 (预留，现在不填也不报错) ---
 #ifdef USE_BVH
-struct BVHNode {
-    float4 bmin; // xyz: min, w: leftNode/start triangle offset
-    float4 bmax; // xyz: max, w: nextIndex/triCount
+struct BVHNode
+{
+    float4 bmin; // xyz: min, w: leftNode/start triangle offset (negative if leaf)
+    float4 bmax; // xyz: max, w: rightNode index / triCount
 };
 StructuredBuffer<BVHNode> _BVHNodes;
 #endif
 
 // ==========================================
-// 几何检测工具函数 (原子逻辑，保持不动)
+// 几何检测工具函数
 // ==========================================
 
-// 三维包围盒击中检测算法
-bool RayAABB(float3 ro, float3 rd, float3 bmin, float3 bmax, out float tMin, out float tMax)
+bool RayAABB(float3 ro, float3 rd, float3 bmin, float3 bmax, out float tMin)
 {
     float3 invD = 1.0 / (rd + 1e-9);
     float3 t0 = (bmin - ro) * invD;
@@ -53,11 +47,10 @@ bool RayAABB(float3 ro, float3 rd, float3 bmin, float3 bmax, out float tMin, out
     float3 tSmall = min(t0, t1);
     float3 tBig = max(t0, t1);
     tMin = max(max(tSmall.x, tSmall.y), tSmall.z);
-    tMax = min(min(tBig.x, tBig.y), tBig.z);
+    float tMax = min(min(tBig.x, tBig.y), tBig.z);
     return tMax >= max(tMin, 0.0);
 }
 
-//三维射线三角相交检测算法
 bool RayTriangle_MT(float3 ro, float3 rd, float3 A, float3 B, float3 C, out float t)
 {
     float3 E1 = B - A;
@@ -80,75 +73,52 @@ bool RayTriangle_MT(float3 ro, float3 rd, float3 A, float3 B, float3 C, out floa
 }
 
 // ==========================================
-// ACCELERATION STRUCTURE LOGIC 
+// BVH 遍歷邏輯 (本地空間)
 // ==========================================
 
-//  原有的遍历方式
-void Intersect_BruteForce(float3 ro, float3 rd, inout float bestT, inout int bestTri)
-{
-    for (int oi = 0; oi < _ObjectCount; oi++)
-    {
-        GPUObject obj = _Objects[oi];
-        float tMin, tMax;
-        if (!RayAABB(ro, rd, obj.aabbMin.xyz, obj.aabbMax.xyz, tMin, tMax))
-            continue;
-        
-        for (int ti = 0; ti < obj.triCount; ti++)
-        {
-            int triIdx = obj.triOffset + ti;
-            GPUTriangle tri = _Triangles[triIdx];
-            float t;
-            if (RayTriangle_MT(ro, rd, tri.A.xyz, tri.B.xyz, tri.C.xyz, t))
-            {
-                if (t < bestT)
-                {
-                    bestT = t;
-                    bestTri = triIdx;
-                }
-            }
-        }
-    }
-}
-
-// BVH 遍历方式 (示例框架)
 #ifdef USE_BVH
-void Intersect_BVH(float3 ro, float3 rd, float t, out int triIdx)
+// 注意：這裡傳入的 ro, rd 必須是已經變換到本地空間的射線
+void Intersect_BVH_Local(float3 ro, float3 rd, inout float bestT, inout int bestTri)
 {
     int stack[32];
     int stackPtr = 0;
     stack[stackPtr++] = 0;
+
     while (stackPtr > 0)
     {
         int nodeIdx = stack[--stackPtr];
         BVHNode node = _BVHNodes[nodeIdx];
-        float tMin, tMax;
-        if (RayAABB(ro,rd,node.bmin.xyz,node.bmax.xyz,tMin,tMax))
+        
+        float tMin;
+        // 早期剔除：如果當前盒子的最近距離已經大於目前已知的最優 T，跳過
+        if (RayAABB(ro, rd, node.bmin.xyz, node.bmax.xyz, tMin) && tMin < bestT)
         {
-            int leftVal = node.bmin.w;
-            int count = node.bmax.w;
-            if (leftVal < 0) // 是叶子节点 ,leftVal = -(start + 1)
+            int leftVal = (int) node.bmin.w;
+            int count = (int) node.bmax.w;
+
+            if (leftVal < 0) // 葉子節點
             {
                 int start = -(leftVal + 1);
-                for (int i = start; i < start + count;i++)
+                for (int i = start; i < start + count; i++)
                 {
-                    GPUTriangle target = _Triangles[i];
-                    float tempT;
-                    if (RayTriangle_MT(ro,rd,target.A.xyz,target.B.xyz,target.C.xyz,tempT))
+                    GPUTriangle tri = _Triangles[i];
+                    float t;
+                    if (RayTriangle_MT(ro, rd, tri.A.xyz, tri.B.xyz, tri.C.xyz, t))
                     {
-                        if (tempT < t && tempT > 0.001)
+                        if (t < bestT && t > 0.001)
                         {
-                            t = tempT;
-                            triIdx = i;
+                            bestT = t;
+                            bestTri = i;
                         }
                     }
                 }
             }
-            else // 不是叶子节点则左右节点压栈
+            else // 內部節點：壓入左右子節點索引
             {
-                if (stackPtr < 32)
+                if (stackPtr < 31)
                 {
-                    stack[stackPtr++] = (int) node.bmin.w;
-                    stack[stackPtr++] = (int) node.bmax.w;
+                    stack[stackPtr++] = (int) node.bmax.w; // Right
+                    stack[stackPtr++] = (int) node.bmin.w; // Left
                 }
             }
         }
@@ -156,17 +126,31 @@ void Intersect_BVH(float3 ro, float3 rd, float t, out int triIdx)
 }
 #endif
 
-// --- 抽象统一接口 ---
-void TraceScene(float3 ro, float3 rd, out float t, out int triIdx)
+// ==========================================
+// SCENE TRAVERSAL (處理實例矩陣變換)
+// ==========================================
+
+void TraceScene(float3 roWorld, float3 rdWorld, out float tWorld, out int triIdx)
 {
-    t = 1e30;
+    tWorld = 1e30;
     triIdx = -1;
 
-#if defined(USE_BVH)
-        Intersect_BVH(ro, rd, t, triIdx);
-#elif defined(USE_BRUTE_FORCE)
-    Intersect_BruteForce(ro, rd, t, triIdx);
-#endif
+    // 邏輯核心：遍歷場景中所有實例
+    for (int i = 0; i < _InstanceCount; i++)
+    {
+        GPUInstanceData inst = _Instances[i];
+
+        // 1. 將世界空間射線轉換到該實例的本地空間
+        // 起點變換 (Point)
+        float3 roLocal = mul(inst.worldToLocal, float4(roWorld, 1.0)).xyz;
+        // 方向變換 (Vector: 丟棄平移)
+        float3 rdLocal = mul((float3x3) inst.worldToLocal, rdWorld);
+
+        // 2. 在本地空間執行 BVH 遍歷
+        // 注意：這裡的 bestT 是相對於 rdLocal 的長度。
+        // 如果有非統一縮放，tWorld 需要額外處理，但對於單純尋找最先擊中的物體，此邏輯依然成立。
+        Intersect_BVH_Local(roLocal, rdLocal, tWorld, triIdx);
+    }
 }
 
 // ==========================================
@@ -178,10 +162,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= (uint) _Width || id.y >= (uint) _Height)
         return;
-    if (id.x != (uint) _Width / 2 || id.y != (uint) _Height / 2)
-        return;
 
-    // 1. 生成光线 (这部分逻辑永远不变)
+    // 1. 生成射線
     float2 uv = (float2(id.xy) + 0.5) / float2(_Width, _Height);
     float3 ro = _CameraToWorld._m03_m13_m23;
     float2 ndc = uv * 2.0 - 1.0;
@@ -189,11 +171,14 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     view.xyz /= view.w;
     float3 rd = normalize(mul((float3x3) _CameraToWorld, view.xyz));
 
-    // 2. 调用抽象接口 (不管底层怎么实现的)
+    // 2. 遍歷場景
     float bestT;
     int bestTri;
     TraceScene(ro, rd, bestT, bestTri);
 
-    // 3. 输出结果
-    _HitResultBuffer[0] = bestTri;
+    // 3. 輸出 (僅中心像素示例)
+    if (id.x == (uint) _Width / 2 && id.y == (uint) _Height / 2)
+    {
+        _HitResultBuffer[0] = bestTri;
+    }
 }

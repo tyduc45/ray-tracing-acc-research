@@ -1,3 +1,5 @@
+using System;
+using System.Runtime.InteropServices;
 using UnityEngine;
 
 public class RayHitHighlighter : MonoBehaviour
@@ -13,8 +15,8 @@ public class RayHitHighlighter : MonoBehaviour
         // 使用 Structured 类型以便在 Shader 中读取
         _hitBuffer = new ComputeBuffer(1, sizeof(int), ComputeBufferType.Structured);
 
-        // 初始值设为 -1，表示没有击中任何三角形
-        _hitBuffer.SetData(new int[] { -1 });
+        // 初始值设为 -42，表示没有击中任何三角形
+        _hitBuffer.SetData(new int[] { -42 });
 
         // 2. 将此 Buffer 绑定到需要变红的材质上
         if (highlightMaterial != null)
@@ -32,8 +34,22 @@ public class RayHitHighlighter : MonoBehaviour
 
     private void Update()
     {
-        Debug.Log("run");
         RayTracingManager.Instance.RegisterHitBuffer(_hitBuffer);
+        if (highlightMaterial != null)
+        {
+            highlightMaterial.SetBuffer("_HitResultBuffer", _hitBuffer);
+        }
+        printBufferData();
+    }
+
+    void printBufferData()
+    {
+        Array array = new int[1];
+        _hitBuffer.GetData(array);
+        foreach(var elem in array)
+        {
+            Debug.Log(elem.ToString());
+        }
     }
 
     private void OnDisable()

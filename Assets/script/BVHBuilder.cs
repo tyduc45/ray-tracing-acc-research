@@ -25,14 +25,15 @@ public class BVHBuilder
     {
         Bounds bound = CalculateBounds(start, count);
         int nodeIdx = _flatNodes.Count;
+        _flatNodes.Add(default);
 
-        if(count <= 2) // leaf node 
+        if (count <= 2) // leaf node 
         {
-            _flatNodes.Add(new BVHNode
+            _flatNodes[nodeIdx] = new BVHNode
             {
                 aabbMin_leftChildOrOffset = new Vector4(bound.min.x, bound.min.y, bound.min.z, -1 * (start + 1)),
                 aabbMax_rightChildOrCount = new Vector4(bound.max.x, bound.max.y, bound.max.z, count)
-            });
+            };
             return nodeIdx;
         }
 
@@ -41,11 +42,11 @@ public class BVHBuilder
         int left = RecursiveBuild(start, splitIdx - start);
         int right = RecursiveBuild(splitIdx, start + count - splitIdx);
 
-        _flatNodes.Add(new BVHNode
+        _flatNodes[nodeIdx] = new BVHNode
         {
             aabbMin_leftChildOrOffset = new Vector4(bound.min.x, bound.min.y, bound.min.z, left),
             aabbMax_rightChildOrCount = new Vector4(bound.max.x, bound.max.y, bound.max.z, right)
-        });
+        };
         return nodeIdx;
     }
     // sah algorithm

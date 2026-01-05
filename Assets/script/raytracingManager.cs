@@ -1,29 +1,43 @@
+
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
 using RayTracing.Data;
+using System.Diagnostics;
+
 
 [RequireComponent(typeof(Camera))]
 public class RayTracingManager : MonoBehaviour
 {
+
     public static RayTracingManager Instance { get; private set; }
-    private ComputeBuffer hitBuffer;
-    private static readonly List<RayTracedMesh> s_meshes = new();
 
+    [Header("Settings")]
     public ComputeShader rayTraceCS;
-    private Camera cam;
-    private int kernel;
-    private uint tgx, tgy, tgz;
 
-    private ComputeBuffer bvhNodeBuffer;
-    private ComputeBuffer triangleBuffer;
-    private BVHBuilder _builder = new();
+    private Camera _cam;
+    private int _kernel;
+    private uint _tgx, _tgy, _tgz;
 
+    // GPU Buffers
+    private ComputeBuffer _bvhNodeBuffer;
+    private ComputeBuffer _triangleBuffer;
+    private ComputeBuffer _instanceBuffer; // 存储每帧变化的矩阵
+    private ComputeBuffer _hitBuffer;
+
+    private BVHNode[] _debugNodes; // 用于可视化调试
+
+    private static readonly List<RayTracedMesh> s_meshes = new();
+    private BVHBuilder _builder = new BVHBuilder();
+    private bool _isInitialized = false;
+
+    // 每一帧缓存的矩阵数组
+    private GPUInstanceData[] _instDataCache;
 
     public static void Register(RayTracedMesh mesh) { if (!s_meshes.Contains(mesh)) s_meshes.Add(mesh); }
     public static void UnRegister(RayTracedMesh mesh) { s_meshes.Remove(mesh); }
 
-    public void RegisterHitBuffer(ComputeBuffer buffer) => hitBuffer = buffer;
+    public void RegisterHitBuffer(ComputeBuffer buffer) => _hitBuffer = buffer;
 
     private void Awake()
     {
@@ -33,95 +47,175 @@ public class RayTracingManager : MonoBehaviour
 
     private void OnEnable()
     {
-        cam = GetComponent<Camera>();
-        RenderPipelineManager.beginCameraRendering += MyRenderer;
+        _cam = GetComponent<Camera>();
+        RenderPipelineManager.beginCameraRendering += OnBeginCamera;
+
         if (rayTraceCS != null)
         {
-            kernel = rayTraceCS.FindKernel("CSMain");
-            rayTraceCS.GetKernelThreadGroupSizes(kernel, out tgx, out tgy, out tgz);
+            _kernel = rayTraceCS.FindKernel("CSMain");
+            rayTraceCS.GetKernelThreadGroupSizes(_kernel, out _tgx, out _tgy, out _tgz);
         }
     }
 
     private void OnDisable()
     {
-        RenderPipelineManager.beginCameraRendering -= MyRenderer;
-        ReleaseAll();
+        RenderPipelineManager.beginCameraRendering -= OnBeginCamera;
+        ReleaseBuffers();
     }
 
-    void ReleaseAll()
+    private void OnBeginCamera(ScriptableRenderContext context, Camera camera)
     {
-        bvhNodeBuffer?.Release();
-        triangleBuffer?.Release();
+        if (camera != _cam) return;
+
+        // 1. 仅在有数据且未初始化时构建一次 BVH
+        if (!_isInitialized && s_meshes.Count > 0)
+        {
+            BuildOnce();
+            _isInitialized = true;
+        }
+
+        // 2. 每一帧都同步所有物体的 Transform
+        if (_isInitialized)
+        {
+            UpdateInstances();
+            Dispatch(camera);
+        }
     }
 
-    void BuildAndUpload()
+    private void BuildOnce()
     {
         s_meshes.RemoveAll(m => m == null);
-        if (s_meshes.Count == 0) return;
-
         List<GPUTriangle> allTris = new List<GPUTriangle>();
+
+        // 【逻辑修正】：此时构建的是本地空间 BVH。
+        // 注意：如果你有多个物体，目前的逻辑是将它们所有本地三角形合在一起。
+        // 为了支持独立移动，你只需要为每个物体记录其在 triangleBuffer 里的 offset。
+        // 这里简化处理：我们假设每个 RayTracedMesh 对应一个独立实例。
         foreach (var rtm in s_meshes)
         {
             var mf = rtm.GetComponent<MeshFilter>();
             if (mf == null || mf.sharedMesh == null) continue;
-            AppendWorldTriangles(mf.sharedMesh, rtm.transform, allTris);
+            AppendLocalTriangles(mf.sharedMesh, allTris);
         }
 
         var (nodes, tris) = _builder.Build(allTris);
+        _debugNodes = nodes; // 存储副本
 
         if (nodes.Length > 0)
         {
-            EnsureBuffers(nodes.Length, tris.Length);
-            bvhNodeBuffer.SetData(nodes);
-            triangleBuffer.SetData(tris);
+            CreateBuffers(nodes.Length, tris.Length);
+            _bvhNodeBuffer.SetData(nodes);
+            _triangleBuffer.SetData(tris);
 
-            rayTraceCS.SetBuffer(kernel, "_BVHNodes", bvhNodeBuffer);
-            rayTraceCS.SetBuffer(kernel, "_Triangles", triangleBuffer);
-            rayTraceCS.SetBuffer(kernel, "_HitResultBuffer", hitBuffer);
+            rayTraceCS.SetBuffer(_kernel, "_BVHNodes", _bvhNodeBuffer);
+            rayTraceCS.SetBuffer(_kernel, "_Triangles", _triangleBuffer);
             rayTraceCS.SetInt("_NodeCount", nodes.Length);
         }
     }
 
-    void EnsureBuffers(int nodeCount, int triCount)
+    private void UpdateInstances()
     {
-        // BVHNode: vec4 * 2 = 32 bytes
-        if (bvhNodeBuffer == null || bvhNodeBuffer.count != nodeCount)
+        if (s_meshes.Count == 0) return;
+
+        // 更新矩阵缓存
+        if (_instDataCache == null || _instDataCache.Length != s_meshes.Count)
+            _instDataCache = new GPUInstanceData[s_meshes.Count];
+
+        for (int i = 0; i < s_meshes.Count; i++)
         {
-            bvhNodeBuffer?.Release();
-            bvhNodeBuffer = new ComputeBuffer(nodeCount, 32);
+            if (s_meshes[i] == null) continue;
+            Transform t = s_meshes[i].transform;
+            _instDataCache[i] = new GPUInstanceData
+            {
+                localToWorld = t.localToWorldMatrix,
+                worldToLocal = t.worldToLocalMatrix
+            };
         }
-        if (triangleBuffer == null || triangleBuffer.count != triCount)
+
+        // 更新 GPU Buffer
+        if (_instanceBuffer == null || _instanceBuffer.count != s_meshes.Count)
         {
-            triangleBuffer?.Release();
-            triangleBuffer = new ComputeBuffer(triCount, 48);
+            _instanceBuffer?.Release();
+            _instanceBuffer = new ComputeBuffer(s_meshes.Count, 128); // 2 * Matrix4x4 (64 bytes each)
         }
+        _instanceBuffer.SetData(_instDataCache);
+        rayTraceCS.SetBuffer(_kernel, "_Instances", _instanceBuffer);
+        rayTraceCS.SetInt("_InstanceCount", s_meshes.Count);
     }
 
-    static void AppendWorldTriangles(Mesh mesh, Transform tr, List<GPUTriangle> outTris)
+    private void CreateBuffers(int nodeCount, int triCount)
+    {
+        _bvhNodeBuffer?.Release();
+        _triangleBuffer?.Release();
+        _bvhNodeBuffer = new ComputeBuffer(nodeCount, 32);
+        _triangleBuffer = new ComputeBuffer(triCount, 48);
+    }
+
+    private void ReleaseBuffers()
+    {
+        _bvhNodeBuffer?.Release();
+        _triangleBuffer?.Release();
+        _instanceBuffer?.Release();
+    }
+
+    private void AppendLocalTriangles(Mesh mesh, List<GPUTriangle> outTris)
     {
         var verts = mesh.vertices;
         var indices = mesh.triangles;
-        Matrix4x4 localToWorld = tr.localToWorldMatrix;
-
         for (int i = 0; i < indices.Length; i += 3)
         {
             outTris.Add(new GPUTriangle
             {
-                A = localToWorld.MultiplyPoint3x4(verts[indices[i]]),
-                B = localToWorld.MultiplyPoint3x4(verts[indices[i + 1]]),
-                C = localToWorld.MultiplyPoint3x4(verts[indices[i + 2]])
+                A = (Vector4)verts[indices[i]],
+                B = (Vector4)verts[indices[i + 1]],
+                C = (Vector4)verts[indices[i + 2]]
             });
         }
     }
 
-    void MyRenderer(ScriptableRenderContext context, Camera cam)
+    private void Dispatch(Camera camera)
     {
-        if (cam != this.cam) return;
-        BuildAndUpload();
+        int w = camera.pixelWidth;
+        int h = camera.pixelHeight;
 
-        int w = cam.pixelWidth, h = cam.pixelHeight;
-        rayTraceCS.SetMatrix("_CameraToWorld", cam.cameraToWorldMatrix);
-        rayTraceCS.SetMatrix("_CameraInverseProjection", cam.projectionMatrix.inverse);
-        rayTraceCS.Dispatch(kernel, Mathf.CeilToInt(w / (float)tgx), Mathf.CeilToInt(h / (float)tgy), 1);
+        rayTraceCS.SetMatrix("_CameraToWorld", camera.cameraToWorldMatrix);
+        rayTraceCS.SetMatrix("_CameraInverseProjection", camera.projectionMatrix.inverse);
+        if (_hitBuffer != null) rayTraceCS.SetBuffer(_kernel, "_HitResultBuffer", _hitBuffer);
+
+        int groupsX = Mathf.CeilToInt(w / (float)_tgx);
+        int groupsY = Mathf.CeilToInt(h / (float)_tgy);
+        rayTraceCS.Dispatch(_kernel, groupsX, groupsY, 1);
     }
+    
+    /*private void OnDrawGizmos()
+    {
+        // 只有在初始化完成且有节点数据时才绘制
+        if (!_isInitialized || _debugNodes == null || _debugNodes.Length == 0) return;
+
+        // 默认以第一个物体的矩阵作为绘制坐标系
+        // 如果没有物体，则使用 Identity (世界原点)
+        Matrix4x4 drawMatrix = s_meshes.Count > 0 ? s_meshes[0].transform.localToWorldMatrix : Matrix4x4.identity;
+        Gizmos.matrix = drawMatrix;
+
+        // 递归绘制（或者循环遍历数组绘制）
+        for (int i = 0; i < _debugNodes.Length; i++)
+        {
+            BVHNode node = _debugNodes[i];
+
+            // 区分叶子节点和内部节点：叶子节点用绿色，内部节点用黄色
+            bool isLeaf = node.aabbMin_leftChildOrOffset.w < 0;
+            Gizmos.color = isLeaf ? Color.green : Color.yellow;
+
+            // 计算中心点和大小
+            Vector3 min = (Vector3)node.aabbMin_leftChildOrOffset;
+            Vector3 max = (Vector3)node.aabbMax_rightChildOrCount;
+            Vector3 center = (min + max) * 0.5f;
+            Vector3 size = max - min;
+
+            // 绘制线框盒
+            Gizmos.DrawWireCube(center, size);
+        }
+
+    }*/
+
 }
