@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
 using RayTracing.Data;
-using System.Diagnostics;
+using System;
 
 
 [RequireComponent(typeof(Camera))]
@@ -73,13 +73,13 @@ public class RayTracingManager : MonoBehaviour
             BuildOnce();
             _isInitialized = true;
         }
-
         // 2. 每一帧都同步所有物体的 Transform
         if (_isInitialized)
         {
             UpdateInstances();
             Dispatch(camera);
         }
+        printBufferData();
     }
 
     private void BuildOnce()
@@ -178,15 +178,35 @@ public class RayTracingManager : MonoBehaviour
         int w = camera.pixelWidth;
         int h = camera.pixelHeight;
 
+        rayTraceCS.SetInt("_Width", w);
+        rayTraceCS.SetInt("_Height", h);
         rayTraceCS.SetMatrix("_CameraToWorld", camera.cameraToWorldMatrix);
         rayTraceCS.SetMatrix("_CameraInverseProjection", camera.projectionMatrix.inverse);
         if (_hitBuffer != null) rayTraceCS.SetBuffer(_kernel, "_HitResultBuffer", _hitBuffer);
 
+
+
         int groupsX = Mathf.CeilToInt(w / (float)_tgx);
         int groupsY = Mathf.CeilToInt(h / (float)_tgy);
         rayTraceCS.Dispatch(_kernel, groupsX, groupsY, 1);
+        
     }
-    
+
+    void printBufferData()
+    {
+        Array array = new int[1];
+        _hitBuffer.GetData(array);
+        foreach (var elem in array)
+        {
+            Debug.Log("manager:" + elem.ToString());
+        }
+    }
+
+    internal void RegisterHitBuffer(object value)
+    {
+        throw new NotImplementedException();
+    }
+
     /*private void OnDrawGizmos()
     {
         // 只有在初始化完成且有节点数据时才绘制
