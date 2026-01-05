@@ -158,17 +158,23 @@ public class RayTracingManager : MonoBehaviour
         _instanceBuffer?.Release();
     }
 
+    // 修改 RayTracingManager.cs 中的 AppendLocalTriangles 方法
     private void AppendLocalTriangles(Mesh mesh, List<GPUTriangle> outTris)
     {
         var verts = mesh.vertices;
         var indices = mesh.triangles;
+
+        // 每个三角形对应 3 个索引，所以循环步长为 3
         for (int i = 0; i < indices.Length; i += 3)
         {
+            // 计算当前三角形在原始 Mesh 中的序号 (Primitive ID)
+            float originalIndex = i / 3.0f;
+
             outTris.Add(new GPUTriangle
             {
-                A = (Vector4)verts[indices[i]],
-                B = (Vector4)verts[indices[i + 1]],
-                C = (Vector4)verts[indices[i + 2]]
+                A = new Vector4(verts[indices[i]].x, verts[indices[i]].y, verts[indices[i]].z, originalIndex),
+                B = new Vector4(verts[indices[i + 1]].x, verts[indices[i + 1]].y, verts[indices[i + 1]].z, 0),
+                C = new Vector4(verts[indices[i + 2]].x, verts[indices[i + 2]].y, verts[indices[i + 2]].z, 0)
             });
         }
     }
@@ -207,35 +213,45 @@ public class RayTracingManager : MonoBehaviour
         throw new NotImplementedException();
     }
 
-    /*private void OnDrawGizmos()
+    private void OnDrawGizmos()
     {
         // 只有在初始化完成且有节点数据时才绘制
         if (!_isInitialized || _debugNodes == null || _debugNodes.Length == 0) return;
 
         // 默认以第一个物体的矩阵作为绘制坐标系
-        // 如果没有物体，则使用 Identity (世界原点)
         Matrix4x4 drawMatrix = s_meshes.Count > 0 ? s_meshes[0].transform.localToWorldMatrix : Matrix4x4.identity;
         Gizmos.matrix = drawMatrix;
 
-        // 递归绘制（或者循环遍历数组绘制）
         for (int i = 0; i < _debugNodes.Length; i++)
         {
             BVHNode node = _debugNodes[i];
 
-            // 区分叶子节点和内部节点：叶子节点用绿色，内部节点用黄色
+            // 核心逻辑：只判断 w < 0 的叶子节点
             bool isLeaf = node.aabbMin_leftChildOrOffset.w < 0;
-            Gizmos.color = isLeaf ? Color.green : Color.yellow;
 
-            // 计算中心点和大小
-            Vector3 min = (Vector3)node.aabbMin_leftChildOrOffset;
-            Vector3 max = (Vector3)node.aabbMax_rightChildOrCount;
-            Vector3 center = (min + max) * 0.5f;
-            Vector3 size = max - min;
+            if (isLeaf)
+            {
+                // 叶子节点通常使用绿色，并稍微增强亮度以便观察
+                Gizmos.color = Color.green;
 
-            // 绘制线框盒
-            Gizmos.DrawWireCube(center, size);
+                // 计算中心点和大小
+                Vector3 min = (Vector3)node.aabbMin_leftChildOrOffset;
+                Vector3 max = (Vector3)node.aabbMax_rightChildOrCount;
+
+                // 逻辑检查点：如果 min 和 max 完全相同，说明 AABB 计算可能出错了
+                if (min == max) continue;
+
+                Vector3 center = (min + max) * 0.5f;
+                Vector3 size = max - min;
+
+                // 绘制实心盒（可选，带透明度）或线框盒
+                // Gizmos.color = new Color(0, 1, 0, 0.2f);
+                // Gizmos.DrawCube(center, size); 
+
+                Gizmos.color = Color.green;
+                Gizmos.DrawWireCube(center, size);
+            }
         }
-
-    }*/
+    }
 
 }

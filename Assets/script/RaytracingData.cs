@@ -8,7 +8,7 @@ namespace RayTracing.Data
     [StructLayout(LayoutKind.Sequential)]
     public struct GPUTriangle
     {
-        public Vector4 A;
+        public Vector4 A; //w 分量现在存储三角形原本的顺序
         public Vector4 B;
         public Vector4 C;
     }

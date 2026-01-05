@@ -77,7 +77,6 @@ bool RayTriangle_MT(float3 ro, float3 rd, float3 A, float3 B, float3 C, out floa
 // ==========================================
 
 #ifdef USE_BVH
-// 注意：這裡傳入的 ro, rd 必須是已經變換到本地空間的射線
 void Intersect_BVH_Local(float3 ro, float3 rd, inout float bestT, inout int bestTri)
 {
     int stack[32];
@@ -90,13 +89,12 @@ void Intersect_BVH_Local(float3 ro, float3 rd, inout float bestT, inout int best
         BVHNode node = _BVHNodes[nodeIdx];
         
         float tMin;
-        // 早期剔除：如果當前盒子的最近距離已經大於目前已知的最優 T，跳過
         if (RayAABB(ro, rd, node.bmin.xyz, node.bmax.xyz, tMin) && tMin < bestT)
         {
             int leftVal = (int) node.bmin.w;
             int count = (int) node.bmax.w;
 
-            if (leftVal < 0) // 葉子節點
+            if (leftVal < 0) // 叶子节点 
             {
                 int start = -(leftVal + 1);
                 for (int i = start; i < start + count; i++)
@@ -105,20 +103,21 @@ void Intersect_BVH_Local(float3 ro, float3 rd, inout float bestT, inout int best
                     float t;
                     if (RayTriangle_MT(ro, rd, tri.A.xyz, tri.B.xyz, tri.C.xyz, t))
                     {
-                        if (t < bestT && t > 0.001)
+                        if (t < bestT)
                         {
                             bestT = t;
-                            bestTri = i;
+                            // 不再返回物理索引 i，而是返回 A.w 中的原始索引 
+                            bestTri = (int) tri.A.w;
                         }
                     }
                 }
             }
-            else // 內部節點：壓入左右子節點索引
+            else
             {
                 if (stackPtr < 31)
                 {
-                    stack[stackPtr++] = (int) node.bmax.w; // Right
-                    stack[stackPtr++] = (int) node.bmin.w; // Left
+                    stack[stackPtr++] = (int) node.bmax.w;
+                    stack[stackPtr++] = (int) node.bmin.w;
                 }
             }
         }
