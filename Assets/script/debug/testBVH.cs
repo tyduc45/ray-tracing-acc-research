@@ -6,8 +6,6 @@ using RayTracing.Data;
 public class BVHBuilderTests:MonoBehaviour
 {
     private BVHBuilder builder;
-    private BVHNode[] _nodes;
-    private GPUTriangle[] _triangles;
 
     [SetUp]
     public void Setup() => builder = new BVHBuilder();
@@ -81,39 +79,10 @@ public class BVHBuilderTests:MonoBehaviour
     private void OnEnable()
     {
         Setup();
-
     }
 
     private void Update()
     {
         Test_BVH_Build_Consistency();
-    }
-
-    private void OnDrawGizmos()
-    {
-        if (_nodes == null || _nodes.Length == 0) return;
-        DrawNode(0, 0);
-    }
-
-    private void DrawNode(int index, int depth)
-    {
-        BVHNode node = _nodes[index];
-        Vector3 min = (Vector3)node.aabbMin_leftChildOrOffset;
-        Vector3 max = (Vector3)node.aabbMax_rightChildOrCount;
-
-        // 层级越高颜色越深
-        Gizmos.color = Color.HSVToRGB(depth * 0.1f % 1.0f, 0.8f, 1.0f);
-        Gizmos.DrawWireCube((min + max) * 0.5f, max - min);
-
-        // 获取子节点索引
-        int left = (int)node.aabbMin_leftChildOrOffset.w;
-        int right = (int)node.aabbMax_rightChildOrCount.w;
-
-        // 如果不是叶子节点 (根据你的代码，叶子节点 w 是负数)
-        if (left >= 0)
-        {
-            DrawNode(left, depth + 1);
-            DrawNode(right, depth + 1);
-        }
     }
 }
