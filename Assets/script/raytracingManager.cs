@@ -2,225 +2,119 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
 
-[RequireComponent(typeof(Camera))]
 public class RayTracingManager : MonoBehaviour
 {
     public static RayTracingManager Instance { get; private set; }
-    private ComputeBuffer hitBuffer; // 外部传入的结果引用
-    private static readonly List<RayTracedMesh> s_meshes = new();
-
-    [Header("Compute")]
     public ComputeShader rayTraceCS;
 
-    private Camera cam;
-    private int kernel;
-    private uint tgx, tgy, tgz;
+    private ComputeBuffer _hitBuffer;
+    private static readonly List<RayTracedMesh> s_meshes = new();
+    private static bool s_structureDirty = true; // 结构脏：物体增删
 
-    private ComputeBuffer objectBuffer;
-    private ComputeBuffer triangleBuffer;
-    
+    private Camera _cam;
+    private ComputeBuffer _objectBuffer;
+    private ComputeBuffer _triangleBuffer;
+
+    // 缓存数据
+    private readonly List<GPUObject> _gpuObjects = new();
+    private readonly List<GPUTriangle> _gpuTriangles = new();
 
     struct GPUObject
     {
-        public Vector4 aabbMin;
-        public Vector4 aabbMax;
-        public int triOffset;
-        public int triCount;
-        public int pad0;
-        public int pad1;
+        public Matrix4x4 worldToLocal; // 64 bytes
+        public Vector4 localAABBMin;   // 16 bytes
+        public Vector4 localAABBMax;   // 16 bytes
+        public int triOffset;          // 4 bytes
+        public int triCount;           // 4 bytes
+        public int pad0, pad1;         // 8 bytes (合计 112 bytes)
     }
 
-    struct GPUTriangle
-    {
-        public Vector4 A;
-        public Vector4 B;
-        public Vector4 C;
-    }
+    struct GPUTriangle { public Vector4 A, B, C; }
 
-    public static void Register(RayTracedMesh mesh)
-    {
-        if (mesh == null) return;
-        if (!s_meshes.Contains(mesh)) s_meshes.Add(mesh);
-    }
+    public static void Register(RayTracedMesh m) { s_meshes.Add(m); s_structureDirty = true; }
+    public static void UnRegister(RayTracedMesh m) { s_meshes.Remove(m); s_structureDirty = true; }
 
-    public static void UnRegister(RayTracedMesh mesh)
-    {
-        if (mesh == null) return;
-        if (s_meshes.Contains(mesh)) s_meshes.Remove(mesh);
-    }
+    private void Awake() { Instance = this; _cam = GetComponent<Camera>(); }
 
-    /// <summary>
-    /// 供外部脚本（如Highlighter）注册输出Buffer
-    /// </summary>
-    public void RegisterHitBuffer(ComputeBuffer buffer)
+    void BuildStructure()
     {
-        
-        hitBuffer = buffer;
-        Debug.Log($"function called and buffer : {buffer != null},{buffer}");
-    }
+        if (!s_structureDirty && _triangleBuffer != null) return;
 
-    private void Awake()
-    {
-        // 初始化单例
-        if (Instance != null && Instance != this)
+        _gpuTriangles.Clear();
+        foreach (var rtm in s_meshes)
         {
-            DestroyImmediate(this);
-            return;
+            var mesh = rtm.GetComponent<MeshFilter>().sharedMesh;
+            rtm.triOffset = _gpuTriangles.Count;
+            rtm.triCount = mesh.triangles.Length / 3;
+
+            Vector3[] verts = mesh.vertices;
+            int[] tris = mesh.triangles;
+            for (int i = 0; i < tris.Length; i += 3)
+            {
+                _gpuTriangles.Add(new GPUTriangle
+                {
+                    A = verts[tris[i]],
+                    B = verts[tris[i + 1]],
+                    C = verts[tris[i + 2]]
+                });
+            }
         }
-        Instance = this;
+
+        _triangleBuffer?.Release();
+        _triangleBuffer = new ComputeBuffer(_gpuTriangles.Count, 48);
+        _triangleBuffer.SetData(_gpuTriangles);
+        s_structureDirty = false;
     }
 
-    private void OnEnable()
+    void UpdateObjectBuffer()
     {
-        cam = GetComponent<Camera>();
-
-        RenderPipelineManager.beginCameraRendering += MyRenderer;
-
-        if (rayTraceCS != null)
+        _gpuObjects.Clear();
+        foreach (var rtm in s_meshes)
         {
-            kernel = rayTraceCS.FindKernel("CSMain");
-            rayTraceCS.GetKernelThreadGroupSizes(kernel, out tgx, out tgy, out tgz);
+            Mesh m = rtm.GetComponent<MeshFilter>().sharedMesh;
+            _gpuObjects.Add(new GPUObject
+            {
+                worldToLocal = rtm.transform.worldToLocalMatrix, // 每帧更新矩阵即可
+                localAABBMin = m.bounds.min, // 局部 AABB 是恒定的
+                localAABBMax = m.bounds.max,
+                triOffset = rtm.triOffset,
+                triCount = rtm.triCount
+            });
         }
+
+        if (_objectBuffer == null || _objectBuffer.count != _gpuObjects.Count)
+        {
+            _objectBuffer?.Release();
+            _objectBuffer = new ComputeBuffer(_gpuObjects.Count, 112);
+        }
+        _objectBuffer.SetData(_gpuObjects);
     }
 
+    private void OnEnable() => RenderPipelineManager.beginCameraRendering += MyRenderer;
     private void OnDisable()
     {
         RenderPipelineManager.beginCameraRendering -= MyRenderer;
-        ReleaseAll();
-        if (Instance == this) Instance = null;
+        _objectBuffer?.Release(); _triangleBuffer?.Release();
     }
 
-    void ReleaseAll()
+    void MyRenderer(ScriptableRenderContext context, Camera camera)
     {
-        if (objectBuffer != null) { objectBuffer.Release(); objectBuffer = null; }
-        if (triangleBuffer != null) { triangleBuffer.Release(); triangleBuffer = null; }
+        if (camera != _cam || s_meshes.Count == 0) return;
+
+        BuildStructure();    // 只有物体增删才重建顶点
+        UpdateObjectBuffer(); // 每帧只传矩阵，极快
+
+        rayTraceCS.SetInt("_Width", camera.pixelWidth);
+        rayTraceCS.SetInt("_Height", camera.pixelHeight);
+        rayTraceCS.SetInt("_ObjectCount", _gpuObjects.Count);
+        rayTraceCS.SetMatrix("_CameraToWorld", camera.cameraToWorldMatrix);
+        rayTraceCS.SetMatrix("_CameraInverseProjection", camera.projectionMatrix.inverse);
+
+        rayTraceCS.SetBuffer(0, "_Objects", _objectBuffer);
+        rayTraceCS.SetBuffer(0, "_Triangles", _triangleBuffer);
+        rayTraceCS.SetBuffer(0, "_HitResultBuffer", _hitBuffer);
+        rayTraceCS.Dispatch(0, Mathf.CeilToInt(camera.pixelWidth / 8f), Mathf.CeilToInt(camera.pixelHeight / 8f), 1);
     }
 
-    static void AppendWorldTriangles(Mesh mesh, Transform tr, List<GPUTriangle> outTris, ref Vector3 aabbMin, ref Vector3 aabbMax, ref bool first)
-    {
-        var verts = mesh.vertices;
-        var indices = mesh.triangles;
-
-        var pos = tr.position;
-        var rot = tr.rotation;
-        var scale = tr.lossyScale;
-
-        for (int i = 0; i < indices.Length; i += 3)
-        {
-            Vector3 la = verts[indices[i + 0]];
-            Vector3 lb = verts[indices[i + 1]];
-            Vector3 lc = verts[indices[i + 2]];
-
-            Vector3 wa = rot * Vector3.Scale(la, scale) + pos;
-            Vector3 wb = rot * Vector3.Scale(lb, scale) + pos;
-            Vector3 wc = rot * Vector3.Scale(lc, scale) + pos;
-
-            outTris.Add(new GPUTriangle
-            {
-                A = new Vector4(wa.x, wa.y, wa.z, 0),
-                B = new Vector4(wb.x, wb.y, wb.z, 0),
-                C = new Vector4(wc.x, wc.y, wc.z, 0),
-            });
-
-            if (first)
-            {
-                aabbMin = wa;
-                aabbMax = wa;
-                first = false;
-            }
-
-            aabbMin = Vector3.Min(aabbMin, Vector3.Min(wa, Vector3.Min(wb, wc)));
-            aabbMax = Vector3.Max(aabbMax, Vector3.Max(wa, Vector3.Max(wb, wc)));
-        }
-    }
-
-    void BuildAndUpload()
-    {
-        // 1. 清理引用
-        for (int i = s_meshes.Count - 1; i >= 0; i--)
-            if (s_meshes[i] == null) s_meshes.RemoveAt(i);
-
-        if (s_meshes.Count == 0) return;
-
-        var objects = new List<GPUObject>();
-        var triangles = new List<GPUTriangle>();
-
-        // 2. 收集所有物体数据
-        for (int mi = 0; mi < s_meshes.Count; mi++)
-        {
-            var rtm = s_meshes[mi];
-            var mf = rtm.GetComponent<MeshFilter>();
-            if (mf == null || mf.sharedMesh == null) continue;
-
-            int triOffset = triangles.Count;
-            Vector3 aabbMin = Vector3.zero, aabbMax = Vector3.zero;
-            bool first = true;
-
-            AppendWorldTriangles(mf.sharedMesh, rtm.transform, triangles, ref aabbMin, ref aabbMax, ref first);
-
-            objects.Add(new GPUObject
-            {
-                aabbMin = aabbMin,
-                aabbMax = aabbMax,
-                triOffset = triOffset,
-                triCount = triangles.Count - triOffset,
-                pad0 = 0,
-                pad1 = 0
-            });
-        }
-       
-        // 3. 统一上传 (修正：移出循环)
-        if (objects.Count > 0 && triangles.Count > 0)
-        {
-            EnsureBuffers(objects.Count, triangles.Count);
-            objectBuffer.SetData(objects);
-            triangleBuffer.SetData(triangles);
-
-            rayTraceCS.SetInt("_ObjectCount", objects.Count);
-            rayTraceCS.SetBuffer(kernel, "_Objects", objectBuffer);
-            rayTraceCS.SetBuffer(kernel, "_Triangles", triangleBuffer);
-            rayTraceCS.SetBuffer(kernel, "_HitResultBuffer", hitBuffer);
-        }
-    }
-
-    void EnsureBuffers(int objCount, int triCount)
-    {
-        int objStride = 48; // Vector4*2 + int*4
-        int triStride = 48; // Vector4*3
-
-        if (objectBuffer == null || objectBuffer.count != objCount)
-        {
-            if (objectBuffer != null) objectBuffer.Release();
-            objectBuffer = new ComputeBuffer(objCount, objStride);
-        }
-
-        if (triangleBuffer == null || triangleBuffer.count != triCount)
-        {
-            if (triangleBuffer != null) triangleBuffer.Release();
-            triangleBuffer = new ComputeBuffer(triCount, triStride);
-        }
-    }
-
-    void Dispatch()
-    {
-        if (rayTraceCS == null || cam == null) return;
-
-        int w = Mathf.Max(1, cam.pixelWidth);
-        int h = Mathf.Max(1, cam.pixelHeight);
-
-        rayTraceCS.SetMatrix("_CameraToWorld", cam.cameraToWorldMatrix);
-        rayTraceCS.SetMatrix("_CameraInverseProjection", cam.projectionMatrix.inverse);
-        rayTraceCS.SetInt("_Width", w);
-        rayTraceCS.SetInt("_Height", h);
-
-        int groupsX = Mathf.CeilToInt(w / (float)tgx);
-        int groupsY = Mathf.CeilToInt(h / (float)tgy);
-        rayTraceCS.Dispatch(kernel, groupsX, groupsY, 1);
-    }
-
-    void MyRenderer(ScriptableRenderContext contex, Camera cam)
-    {
-        BuildAndUpload();
-        Dispatch();
-    }
+    public void RegisterHitBuffer(ComputeBuffer b) => _hitBuffer = b;
 }

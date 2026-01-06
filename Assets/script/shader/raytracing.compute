@@ -1,7 +1,6 @@
-﻿// CSMain.compute
-#pragma kernel CSMain
+﻿#pragma kernel CSMain
 
-RWStructuredBuffer<int> _HitResultBuffer; // 存储被击中的三角形索引
+RWStructuredBuffer<int> _HitResultBuffer;
 
 int _Width;
 int _Height;
@@ -10,8 +9,9 @@ float4x4 _CameraInverseProjection;
 
 struct GPUObject
 {
-    float4 aabbMin;
-    float4 aabbMax;
+    float4x4 worldToLocal; // 新增：从世界空间转回局部空间的矩阵
+    float4 localAABBMin; // 改为：局部空间的 AABB
+    float4 localAABBMax;
     int triOffset;
     int triCount;
     int pad0, pad1;
@@ -19,14 +19,14 @@ struct GPUObject
 
 struct GPUTriangle
 {
-    float4 A, B, C;
+    float4 A, B, C; // 存储的是原始 Mesh 的顶点，不再随物体移动更新
 };
 
 StructuredBuffer<GPUObject> _Objects;
 StructuredBuffer<GPUTriangle> _Triangles;
 int _ObjectCount;
 
-// 修正后的 AABB 检测
+// AABB 和 MT 算法保持不变，但输入参数现在是 Local Space 的
 bool RayAABB(float3 ro, float3 rd, float3 bmin, float3 bmax, out float tMin, out float tMax)
 {
     float3 invD = 1.0 / (rd + 1e-9);
@@ -35,11 +35,10 @@ bool RayAABB(float3 ro, float3 rd, float3 bmin, float3 bmax, out float tMin, out
     float3 tSmall = min(t0, t1);
     float3 tBig = max(t0, t1);
     tMin = max(max(tSmall.x, tSmall.y), tSmall.z);
-    tMax = min(min(tBig.x, tBig.y), tBig.z); // 修正点
+    tMax = min(min(tBig.x, tBig.y), tBig.z);
     return tMax >= max(tMin, 0.0);
 }
 
-// 修正后的 MT 算法
 bool RayTriangle_MT(float3 ro, float3 rd, float3 A, float3 B, float3 C, out float t)
 {
     float3 E1 = B - A;
@@ -54,7 +53,7 @@ bool RayTriangle_MT(float3 ro, float3 rd, float3 A, float3 B, float3 C, out floa
     if (u < 0.0 || u > 1.0)
         return false;
     float3 Q = cross(T, E1);
-    float v = dot(rd, Q) * invDet; // 修正点
+    float v = dot(rd, Q) * invDet;
     if (v < 0 || (u + v) > 1.0)
         return false;
     t = dot(E2, Q) * invDet;
@@ -64,50 +63,51 @@ bool RayTriangle_MT(float3 ro, float3 rd, float3 A, float3 B, float3 C, out floa
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID)
 {
-    if (id.x >= (uint) _Width || id.y >= (uint) _Height)
-        return;
-
-    // 只有屏幕中心发出的光线才触发检测（或者你可以根据鼠标点击位置）
-    // 这里假设只检测屏幕中心那条线，减少冲突
     if (id.x != (uint) _Width / 2 || id.y != (uint) _Height / 2)
         return;
 
     float2 uv = (float2(id.xy) + 0.5) / float2(_Width, _Height);
-    float3 ro = _CameraToWorld._m03_m13_m23;
-    
+    float3 worldRo = _CameraToWorld._m03_m13_m23;
     float2 ndc = uv * 2.0 - 1.0;
     float4 view = mul(_CameraInverseProjection, float4(ndc, 1.0, 1.0));
     view.xyz /= view.w;
-    float3 rd = normalize(mul((float3x3) _CameraToWorld, view.xyz));
+    float3 worldRd = normalize(mul((float3x3) _CameraToWorld, view.xyz));
 
     float bestT = 1e30;
     int bestTri = -1;
-    int hitObjIdx = -1;
 
     for (int oi = 0; oi < _ObjectCount; oi++)
     {
         GPUObject obj = _Objects[oi];
+        
+        // --- 逻辑关键点：将射线拉入 Local 空间 ---
+        // 1. 变换起点 (Point)
+        float3 localRo = mul(obj.worldToLocal, float4(worldRo, 1.0)).xyz;
+        // 2. 变换方向 (Vector) - 注意这里不能包含平移
+        float3 localRd = mul((float3x3) obj.worldToLocal, worldRd);
+        
+        // 3. 重要：记录缩放系数。因为 localRd 没有归一化，
+        // 这样求出的 t 直接就是世界空间的物理距离，不需要额外转换。
+        // 如果这里 normalize(localRd)，求出的 t 将会是 Local 空间的长度。
+        
         float tMin, tMax;
-        if (!RayAABB(ro, rd, obj.aabbMin.xyz, obj.aabbMax.xyz, tMin, tMax))
+        if (!RayAABB(localRo, localRd, obj.localAABBMin.xyz, obj.localAABBMax.xyz, tMin, tMax))
             continue;
+
         int start = obj.triOffset;
         for (int ti = 0; ti < obj.triCount; ti++)
         {
             GPUTriangle tri = _Triangles[start + ti];
             float t;
-            if (RayTriangle_MT(ro, rd, tri.A.xyz, tri.B.xyz, tri.C.xyz, t))
+            if (RayTriangle_MT(localRo, localRd, tri.A.xyz, tri.B.xyz, tri.C.xyz, t))
             {
                 if (t < bestT)
                 {
                     bestT = t;
-                    hitObjIdx = oi;
                     bestTri = start + ti;
                 }
             }
         }
     }
-    if (id.x == (uint) _Width / 2 && id.y == (uint) _Height / 2)
-    {
-        _HitResultBuffer[0] = bestTri;
-    }
+    _HitResultBuffer[0] = bestTri;
 }
