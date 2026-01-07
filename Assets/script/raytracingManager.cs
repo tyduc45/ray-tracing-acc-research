@@ -190,8 +190,6 @@ public class RayTracingManager : MonoBehaviour
         rayTraceCS.SetMatrix("_CameraInverseProjection", camera.projectionMatrix.inverse);
         if (_hitBuffer != null) rayTraceCS.SetBuffer(_kernel, "_HitResultBuffer", _hitBuffer);
 
-
-
         int groupsX = Mathf.CeilToInt(w / (float)_tgx);
         int groupsY = Mathf.CeilToInt(h / (float)_tgy);
         rayTraceCS.Dispatch(_kernel, groupsX, groupsY, 1);
